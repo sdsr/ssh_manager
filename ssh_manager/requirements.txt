@@ -1,0 +1,16 @@
+# SSH Manager Dependencies
+# 설치: pip install -r requirements.txt
+
+# SSH 연결 및 파일 전송
+paramiko>=3.4.0
+
+# 터미널 UI
+rich>=13.7.0
+textual>=0.47.0
+
+# 비밀번호 암호화 저장
+cryptography>=41.0.0
+
+# 단일 실행 파일 빌드 (폐쇄망용)
+pyinstaller>=6.0.0
+
