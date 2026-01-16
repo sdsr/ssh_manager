@@ -605,8 +605,9 @@ class SSHManagerUI:
         print_servers_table(connected, show_index=True, title="연결된 서버")
         
         options = [
-            ("1", "파일 업로드 (로컬 -> 원격)"),
-            ("2", "파일 다운로드 (원격 -> 로컬)"),
+            ("1", "파일/폴더 업로드 (로컬 -> 원격)"),
+            ("2", "파일 다운로드 (단일 서버)"),
+            ("3", "폴더 다운로드 (여러 서버 -> IP별 zip)"),
             ("b", "뒤로 가기"),
         ]
         
@@ -616,6 +617,8 @@ class SSHManagerUI:
             self._upload_file(connected)
         elif choice == "2":
             self._download_file(connected)
+        elif choice == "3":
+            self._download_folder_as_zip(connected)
     
     def _upload_file(self, servers: list[Server]):
         """파일 업로드"""
@@ -711,6 +714,76 @@ class SSHManagerUI:
                 console.print(f"속도: {format_speed(result.speed)}")
             else:
                 console.print(f"\n[red]다운로드 실패: {result.error_message}[/red]")
+            
+        except (KeyboardInterrupt, ValueError):
+            console.print("\n[yellow]취소되었습니다.[/yellow]")
+        
+        Prompt.ask("\n계속하려면 Enter를 누르세요")
+    
+    def _download_folder_as_zip(self, servers: list[Server]):
+        """여러 서버에서 폴더 다운로드 -> IP별 zip 파일로 저장"""
+        console.print("\n[cyan]여러 서버에서 같은 폴더를 다운로드하여 IP별 zip으로 저장합니다.[/cyan]")
+        console.print("[dim]예: /test 폴더 -> test_10.10.30.123.zip, test_10.10.30.124.zip[/dim]\n")
+        
+        console.print("[dim]여러 서버: 번호를 쉼표로 구분 / 전체: 'all'[/dim]")
+        
+        try:
+            selection = Prompt.ask("대상 서버", default="all").strip()
+            
+            if selection.lower() == "all":
+                selected_servers = servers
+            else:
+                indices = [int(x.strip()) - 1 for x in selection.split(",")]
+                selected_servers = [servers[i] for i in indices if 0 <= i < len(servers)]
+            
+            if not selected_servers:
+                console.print("[red]선택된 서버가 없습니다.[/red]")
+                Prompt.ask("\n계속하려면 Enter를 누르세요")
+                return
+            
+            remote_path = Prompt.ask("원격 폴더 경로 (예: /home/user/test)")
+            local_dir = Prompt.ask("로컬 저장 디렉토리", default=".")
+            
+            # 폴더명 추출
+            folder_name = remote_path.rstrip('/').split('/')[-1]
+            
+            console.print(f"\n[cyan]{len(selected_servers)}개 서버에서 '{folder_name}' 폴더 다운로드 중...[/cyan]")
+            console.print(f"[dim]저장 위치: {local_dir}/{folder_name}_<IP>.zip[/dim]\n")
+            
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task("다운로드 중...", total=len(selected_servers))
+                
+                def on_result(result: TransferResult):
+                    if result.success:
+                        console.print(f"  [green]V[/green] {result.server.name}: {result.local_path}")
+                    else:
+                        console.print(f"  [red]X[/red] {result.server.name}: {result.error_message}")
+                    progress.advance(task)
+                
+                results = self.file_transfer.download_from_servers_as_zip(
+                    selected_servers,
+                    remote_path,
+                    local_dir,
+                    folder_name,
+                    result_callback=on_result
+                )
+            
+            console.print()
+            print_transfer_results(results)
+            
+            # 성공한 파일 목록 표시
+            success_files = [r.local_path for r in results if r.success]
+            if success_files:
+                console.print(f"\n[green]생성된 zip 파일 ({len(success_files)}개):[/green]")
+                for f in success_files:
+                    console.print(f"  - {f}")
             
         except (KeyboardInterrupt, ValueError):
             console.print("\n[yellow]취소되었습니다.[/yellow]")

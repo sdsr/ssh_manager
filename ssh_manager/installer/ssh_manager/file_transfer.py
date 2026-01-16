@@ -487,6 +487,156 @@ class MultiFileTransfer:
             return transfer.download(remote_path, local_path, progress_callback)
         finally:
             transfer.disconnect()
+    
+    def download_from_servers_as_zip(
+        self,
+        servers: list[Server],
+        remote_path: str,
+        local_dir: str,
+        folder_name: str = None,
+        progress_callback: Callable[[TransferProgress], None] = None,
+        result_callback: Callable[[TransferResult], None] = None
+    ) -> list[TransferResult]:
+        """
+        여러 서버에서 폴더를 다운로드하여 IP별 zip 파일로 저장
+        
+        예: /test 폴더 다운로드 시
+            -> test_10.10.30.123.zip
+            -> test_10.10.30.124.zip
+        
+        Args:
+            servers: 대상 서버 목록
+            remote_path: 원격 폴더 경로 (예: /home/user/test)
+            local_dir: 로컬 저장 디렉토리
+            folder_name: zip 파일 이름 접두사 (없으면 원격 폴더명 사용)
+            progress_callback: 진행률 콜백
+            result_callback: 각 서버 완료 시 콜백
+            
+        Returns:
+            각 서버의 다운로드 결과
+        """
+        import zipfile
+        import tempfile
+        import shutil
+        
+        results = []
+        result_queue = Queue()
+        threads = []
+        
+        # 폴더 이름 추출
+        if not folder_name:
+            folder_name = Path(remote_path.rstrip('/')).name
+        
+        # 로컬 저장 디렉토리 생성
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        
+        def download_task(server: Server):
+            transfer = SFTPTransfer(server)
+            temp_dir = None
+            try:
+                success, error = transfer.connect()
+                if not success:
+                    result = TransferResult(
+                        server=server,
+                        local_path="",
+                        remote_path=remote_path,
+                        success=False,
+                        error_message=error
+                    )
+                    result_queue.put(result)
+                    if result_callback:
+                        result_callback(result)
+                    return
+                
+                # 임시 디렉토리에 다운로드
+                temp_dir = tempfile.mkdtemp()
+                temp_folder = os.path.join(temp_dir, folder_name)
+                os.makedirs(temp_folder, exist_ok=True)
+                
+                # 원격 폴더의 모든 파일 다운로드
+                downloaded_files = []
+                total_size = 0
+                
+                def download_recursive(remote_dir: str, local_dir: str):
+                    nonlocal total_size
+                    try:
+                        for item in transfer._sftp_client.listdir_attr(remote_dir):
+                            remote_item = f"{remote_dir}/{item.filename}"
+                            local_item = os.path.join(local_dir, item.filename)
+                            
+                            if stat_module.S_ISDIR(item.st_mode):
+                                # 디렉토리면 재귀
+                                os.makedirs(local_item, exist_ok=True)
+                                download_recursive(remote_item, local_item)
+                            else:
+                                # 파일이면 다운로드
+                                transfer._sftp_client.get(remote_item, local_item)
+                                downloaded_files.append(local_item)
+                                total_size += item.st_size
+                    except Exception as e:
+                        pass  # 권한 없는 파일 스킵
+                
+                import stat as stat_module
+                download_recursive(remote_path.rstrip('/'), temp_folder)
+                
+                # zip 파일 생성 (폴더명_IP주소.zip)
+                zip_filename = f"{folder_name}_{server.host}.zip"
+                zip_path = os.path.join(local_dir, zip_filename)
+                
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in downloaded_files:
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+                
+                zip_size = os.path.getsize(zip_path)
+                
+                result = TransferResult(
+                    server=server,
+                    local_path=zip_path,
+                    remote_path=remote_path,
+                    success=True,
+                    transferred_bytes=zip_size
+                )
+                result_queue.put(result)
+                if result_callback:
+                    result_callback(result)
+                    
+            except Exception as e:
+                result = TransferResult(
+                    server=server,
+                    local_path="",
+                    remote_path=remote_path,
+                    success=False,
+                    error_message=str(e)
+                )
+                result_queue.put(result)
+                if result_callback:
+                    result_callback(result)
+            finally:
+                transfer.disconnect()
+                # 임시 디렉토리 정리
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        # 각 서버마다 스레드 생성
+        for server in servers:
+            thread = threading.Thread(target=download_task, args=(server,))
+            thread.start()
+            threads.append(thread)
+        
+        # 모든 스레드 완료 대기
+        for thread in threads:
+            thread.join()
+        
+        # 결과 수집
+        while True:
+            try:
+                result = result_queue.get_nowait()
+                results.append(result)
+            except Empty:
+                break
+        
+        return results
 
 
 def format_size(size_bytes: int) -> str:
